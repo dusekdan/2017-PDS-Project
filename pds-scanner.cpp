@@ -1,115 +1,382 @@
-#include <iostream>
-#include <vector>
-
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/types.h>
-#include <ifaddrs.h>
-#include <netinet/in.h>
-#include <string.h>
-#include <arpa/inet.h>
-#include <sys/ioctl.h>
-#include <net/if.h>
-
 #include "pds-scanner.h"
 
-#include <linux/if_ether.h>
-#include <linux/if_packet.h>
-#include <sys/socket.h>
-#include <net/ethernet.h>
-
-#include <unistd.h>
-#include <sys/wait.h>
-#include <sys/time.h>
-
-
-#define EXIT_SUCCESS 0
-#define DEBUG 1
-
-void extractAddressesForInterface();
-void extractAllInterfaceAddresses();
-void discoverDevicesARP();
-void discoverDevicesNDP();
-
-std::string getReadableIPv4Address(uint32_t address);
-std::string getReadableIPv4Address(uint8_t* address);
-void printReadableMACAddress(uint8_t* MAC);
-
-void debug_showDiscoveredDevices();
-
-struct Parameters
-{
-	std::string interfaceName;
-	std::string outputFileName;
-};
-struct Parameters P;
-
-struct Network
-{
-	std::string ipv4AddressLocal;
-	uint32_t	ipv4Local;
-	uint32_t	ipv4NetworkMask;
-
-
-	struct sockaddr_in* netmask;
-	struct sockaddr_in* ipv4;
-
-	uint8_t		macAddressLocal[MAC_ADDR_LEN];
-
-	std::string ipv6AddressLocal;
-	//struct in_addr ipv4;
-};
-struct Network addresses;
-
-
-
+/**
+ *	Application entry point
+ */
 int main(int argc, char **argv)
 {
 	// Process parameters
-
-
-	// TODO: Remove hardcoded input variables
-	P.interfaceName = "eth1";
-	P.outputFileName = "ScanResults.xml";
-
-
-	// TODO: Think about design point of view (global variable, really?)
+	processArguments(argc, argv);
+	
 	// Extract required information from provided interface and store it to global variable/proper structure
 	extractAddressesForInterface();
-
-
-	// How to print dot notation of IPv4 address: 				inet_ntoa(addresses.ipv4->sin_addr)
-	// Convert this to numeric representation					ntohl(inet_addr(inet_ntoa(addresses.ipv4->sin_addr)))
-	// - There is ntohl because we work with 32bit numbers and we have to ensure right byte order
-
-	// Test whether values are loaded properly
-	// std::cout << "IPv4: "  << std::hex << ntohl(inet_addr(inet_ntoa(addresses.ipv4->sin_addr))) << std::endl;
-	// std::cout << "Maska: " << std::hex << ntohl(inet_addr(inet_ntoa(addresses.netmask->sin_addr))) << std::endl;
 
 	// Initiate ARP scanning (if applicable) - IPv4
 	discoverDevicesARP();
 
-	if (DEBUG)
-		debug_showDiscoveredDevices();
-
 	// Initiate NDP scanning (if applicable) - IPv6
 	discoverDevicesNDP();
+
+	// Show discovered devices to user
+	debug_showDiscoveredDevices();
 
 	return EXIT_SUCCESS;
 
 }
 
-void debug_showDiscoveredDevices()
+
+/**
+ *	Processes parameters supplied from commandline (using getopts() library)
+ */
+void processArguments(int argc, char** argv)
 {
-	for (std::vector<Devices>::iterator it = discoveredDevices.begin(); it != discoveredDevices.end(); it++)
+	if (argc != ARGUMENT_NUMBER)
 	{
-		std::cout << "Discovered: ";
-		printReadableMACAddress(it->macAddress);
-		std::cout << "on IPv4 address: " << getReadableIPv4Address(it->ipv4Address) << std::endl;
+		std::cerr << "Incorrect arguments supplied. Try ./pds-scanner -i interfaceName -f outputFileName.xml" << std::endl;
+		exit(2);
+	}
+
+	int ch;
+	while ((ch = getopt(argc, argv, "i:f:")) != -1)
+	{
+		switch (ch)
+		{
+			case 'i':
+				P.interfaceName = optarg;
+				break;
+			case 'f':
+				P.outputFileName = optarg;
+				break;
+		}
 	}
 }
 
+
+/**
+ *	This coding masterpiece very clumsily computes neighbor solicited-node multicast address
+ *	Even reading the previous line hurts me, let alone reading the code again. It pretty much
+ *  does everything that could be done via some basic bitwise shift operations, but lets face
+ *	it, I was unable to make it work the right way. Apologies on my side.
+ *
+ *	Computation algorithm ripped off: https://en.wikipedia.org/wiki/Solicited-node_multicast_address 
+ *	Input: in6_addr of target node (rest from address structure)
+ *	Ouput: in6_addr of neighbor solicited-node multicast address
+ */
+in6_addr computeNSMCNodeAddress(in6_addr targetAddr)
+{
+
+	if (DEBUG)
+	{
+		std::cout << "======IP=====" << convertIPv6ToString(targetAddr) << std::endl;
+	}
+
+	// Prepare last 3 bytes of target address
+	uint8_t targetLast24b[3];
+	memcpy(targetLast24b, &targetAddr.s6_addr[13], 3);	
+
+	// Prepare first 24 bytes of prefix address
+	in6_addr prefixSNMAddress;
+	convertStringToIPv6(IPV6_NS_PREFIX_OR_SOMETHING, &prefixSNMAddress);
+	uint8_t prefixFirst104b[13];
+	memcpy(prefixFirst104b, &prefixSNMAddress, 13);
+
+	if (DEBUG)
+	{
+		std::cout << std::endl << "===DEBUG===" << std::endl;	
+		std::cout << std::hex << (unsigned short) targetLast24b[0] << "." << std::hex << (unsigned short) targetLast24b[1] << "." << std::hex << (unsigned short) targetLast24b[2] << std::endl;	
+		std::cout << (unsigned short) prefixFirst104b[0] << "." << (unsigned short) prefixFirst104b[1] <<  "." << (unsigned short) prefixFirst104b[2] <<  "." << (unsigned short) prefixFirst104b[3] << std::endl;
+		std::cout << "===DEBUG===" << std::endl;			
+	}
+
+	// Merge prepared values together
+	// BEHOLD MY MASTERPIECE!
+	unsigned char tmp_s6_addr[16];
+	tmp_s6_addr[0] = 	prefixFirst104b[0];
+	tmp_s6_addr[1] = 	prefixFirst104b[1];
+	tmp_s6_addr[2] = 	prefixFirst104b[2];
+	tmp_s6_addr[3] = 	prefixFirst104b[3];
+	tmp_s6_addr[4] = 	prefixFirst104b[4];
+	tmp_s6_addr[5] = 	prefixFirst104b[5];
+	tmp_s6_addr[6] = 	prefixFirst104b[6];
+	tmp_s6_addr[7] = 	prefixFirst104b[7];
+	tmp_s6_addr[8] = 	prefixFirst104b[8];
+	tmp_s6_addr[9] = 	prefixFirst104b[9];
+	tmp_s6_addr[10] = 	prefixFirst104b[10];
+	tmp_s6_addr[11] = 	prefixFirst104b[11];
+	tmp_s6_addr[12] = 	prefixFirst104b[12];
+	tmp_s6_addr[13] = 	targetLast24b[0];
+	tmp_s6_addr[14] = 	targetLast24b[1];
+	tmp_s6_addr[15] =  	targetLast24b[2];				
+
+	in6_addr nodeAddress;
+	memcpy(&nodeAddress, &tmp_s6_addr, IPV6_LEN);
+
+	return nodeAddress;		
+}
+
+
+/**
+ * Scans for devices connected (via NDP)
+ */
+void discoverDevicesNDP()
+{
+	pid_t workerProc = fork();
+	if (workerProc != CHILD_PROCESS)
+	{
+		// Now, parent is receiving packets
+		ICMPv6Echo ping6PacketReply;
+
+		int ndpResponseSocket = socket (AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
+			if(ndpResponseSocket < 0)
+			{
+				std::cerr << "Unable to create NDP response socket. Better luck next time!" << std::endl;
+				exit(1);
+			}
+
+		
+		// IPv6 address of all nodes (the one we are going to ping)
+		in6_addr myAddress;
+		convertStringToIPv6(addresses.ipv6AddressLocal, &myAddress);
+
+		// Prepare socket addr
+		sockaddr_in6 socketAddress = prepareNDPSocketAddress(myAddress, P.interfaceName);
+
+
+		int bindResult = bind(ndpResponseSocket, (struct sockaddr*) &socketAddress, sizeof(socketAddress));
+		int errb = errno;
+		if (bindResult < 0)
+		{
+			std::cerr << "Unable to bind socket for ping6 response! : " << errb << strerror(errb) << std::endl;
+			exit(1);
+		}
+
+		// Receive responses
+		while (true)
+		{
+			
+			//std::cout << "Catching replies..." << std::endl;
+			//std::cout << "Devices discovered. Proceeding to send solicitations." << std::endl; 
+
+			struct timeval tv;
+			tv.tv_sec = 1;
+			tv.tv_usec = 0;
+
+			if (setsockopt(ndpResponseSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0)
+			{
+				std::cerr << "Unable to set timeout for ndpResponseSocket." << std::endl;
+				// But I guess that it is not a big deal
+			}
+
+			socklen_t forcedPointerLen = sizeof(socketAddress);
+			if (recvfrom(ndpResponseSocket, &ping6PacketReply, sizeof(ping6PacketReply), 0, (struct sockaddr*)&socketAddress, &forcedPointerLen) <= 0)
+			{
+				//std::cerr << "0 bytes response, problems when receiving packet, or timeouted." << std::endl;
+				break;
+			}
+
+			// Again focus only on PING replies
+			if (ping6PacketReply.type != 129)
+			{
+				if (DEBUG)
+					std::cout << "Received ICMPv6 packet, but was not of type Echo-Reply." << std::endl;
+
+				continue;
+			}
+
+
+			// Don't forget that it also pings back with your IP
+			if (addresses.ipv6AddressLocal != convertIPv6ToString(socketAddress.sin6_addr))	
+			{
+				discoveredPingIPv6.push_back(socketAddress.sin6_addr);
+				std::cout << "IPv6 Device found: " << convertIPv6ToString(socketAddress.sin6_addr) << std::endl;
+			}
+		}
+
+		
+		waitpid(workerProc, NULL, 0);		// Wait for child that was sending ping requests
+		close(ndpResponseSocket);
+
+		// On discovered IPv6 send NS and read NA - parent should probably read (again), child should be sending - so we are not dealing with sharedmemory issues again
+		pid_t solicitationSender = fork();
+
+		int retry = 5;
+		if (solicitationSender != CHILD_PROCESS)
+		{
+			// Socket for receiving adverts
+			int ndpAdvertisementSocket = socket (AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
+			if (ndpAdvertisementSocket < 0)
+			{
+				std::cerr << "Unable to create advertisement receiver socket." << std::endl;
+			}
+
+			in6_addr myIPv6Address;
+			convertStringToIPv6(addresses.ipv6AddressLocal, &myIPv6Address);
+
+			while(true)
+			{
+				// ADVERTISEMENT RECEIVAL
+				NeighborAdvertisementPacket nap;
+	
+				// Prepare receiving socket address
+				sockaddr_in6 socketAddressRecv =  prepareNDPSocketAddress(myIPv6Address, P.interfaceName);
+
+				// And right away, receive something
+				struct timeval tv;
+				tv.tv_sec = 1;
+				tv.tv_usec = 0;
+
+				setsockopt(ndpAdvertisementSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+				socklen_t forcedPointerLen = sizeof(socketAddressRecv);
+				if (recvfrom(ndpAdvertisementSocket, &nap, sizeof(nap), 0, (struct sockaddr*)&socketAddressRecv, &forcedPointerLen) <= 0)
+				{
+					std::cerr << "\tTimeout expired... retrying" << std::endl;
+
+					if(!retry)
+						break;
+
+					retry--;	
+					continue;
+				}
+
+
+				if (nap.head.nd_na_hdr.icmp6_type == 136)
+				{
+				
+					std::cout << "Received NA reply from: " << convertIPv6ToString(nap.head.nd_na_target) << " with MAC ";
+					printReadableMACAddress(nap.MAC);
+					std::cout << std::endl;
+
+					// Store discovered device
+					Devices discovered;
+					memcpy(&discovered.macAddress, nap.MAC, MAC_ADDR_LEN);
+					discovered.ipv6AddressLL = convertIPv6ToString(nap.head.nd_na_target);
+					discoveredDevices.push_back(discovered);
+
+					// Reset retry counter and inform user
+					std::cout << "Resetting retry counter, 5 retries remaining..." << std::endl;
+					retry = 5;
+				}				
+			}
+
+			waitpid(solicitationSender, NULL, 0);	// Wait for kid to do the sending
+		}
+		else
+		{
+
+			// For every discovered IPv6 send neighbor solicitation packet
+			for (std::vector<in6_addr>::iterator it = discoveredPingIPv6.begin(); it != discoveredPingIPv6.end(); it++)
+			{
+
+				// Socket for sending solicitation requests
+				int ndpSolicitationSocket = socket (AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
+				if(ndpSolicitationSocket < 0)
+				{
+					std::cerr << "Unable to create solicitation socket." << std::endl;
+				}
+
+				int sockOptMaxHosts = 255;
+				setsockopt(ndpSolicitationSocket, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &sockOptMaxHosts, sizeof(sockOptMaxHosts));
+
+				// SOLICIT SEND-OUTS
+				NeighborSolicitationPacket nsp;
+				in6_addr targetAddr = *it;
+
+				// For each addres compute its multicast solicit node address
+				in6_addr NSMCNodeAddr  = computeNSMCNodeAddress(*it);
+
+				// Socket address changes with every NS message to be send, so we have to change socket address appropriately in every iteration
+				// Prepare socket address
+				sockaddr_in6 socketAddress;
+				socketAddress.sin6_family = AF_INET6;
+				memcpy(&socketAddress.sin6_addr, &NSMCNodeAddr, IPV6_LEN);
+				socketAddress.sin6_flowinfo = 0;
+				socketAddress.sin6_port = 0;
+				socketAddress.sin6_scope_id = 0; 
+
+
+
+				// Prepare packet
+				nsp.head.nd_ns_hdr.icmp6_type = 135;	//ND_NEIGHBOR_SOLICIT
+				nsp.head.nd_ns_hdr.icmp6_code = 0;
+				nsp.head.nd_ns_hdr.icmp6_cksum = htons ( 0 );
+				nsp.head.nd_ns_reserved = htonl ( 0 );
+				memcpy(&nsp.head.nd_ns_target, &targetAddr, IPV6_LEN);	
+				nsp.type = NDP_ETHERNET_HWTYPE ;	// Not sure why, but with htons() it did not work
+				nsp.length =  1;					// Not sure why, but with htons() it did not work
+				memcpy(&nsp.MAC, &addresses.macAddressLocal, MAC_ADDR_LEN);
+				
+				// Send
+				sendto(ndpSolicitationSocket, &nsp, sizeof (nsp), 0, (sockaddr*)&socketAddress, sizeof(socketAddress));
+
+				int errbno = errno;
+				if (!errbno)
+				{
+					std::cerr << "Failed to send neighbor solicitation" << errbno << std::endl;
+				}
+
+
+				if (DEBUG)
+					std::cout << "=== Right about now, solicitation packet for " << convertIPv6ToString(*it) << std::endl;
+
+				close(ndpSolicitationSocket);
+			}
+
+			exit(0);	// Kill the kid
+		}
+	}
+	else	
+	{
+		// Child proces will now send discovery packets (pings)
+		// Prepare IPv6 socket
+		int ndpDiscoverySocket = socket (AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);		// Whole ping6 packet construction is heavily inspired by original ping6 implementation
+			if (ndpDiscoverySocket < 0)
+			{
+				std::cerr << "Unable to open socket for NDP station discovery!" << std::endl;
+				exit(1);
+			}
+
+
+		// IPv6 address of all nodes (the one we are going to ping)
+		in6_addr allNodes;
+		convertStringToIPv6(IPV6_ALLNODES, &allNodes);
+
+
+		// Prepare IPv6 socket address
+		sockaddr_in6 socketAddress = prepareNDPSocketAddress(allNodes, P.interfaceName);
+	
+		if (bind(ndpDiscoverySocket, (struct sockaddr*) &socketAddress, sizeof(socketAddress)) < 0)
+		{
+			std::cerr << "Unable to bind socket for NDP station discovery!" << std::endl;
+			exit(1);
+		}
+
+		// Create ICMPv6 ping packet
+		ICMPv6Echo ping6Packet;
+		ping6Packet.type = 128; 								// TODO: Introduce proper constant for this
+		ping6Packet.code = 0;	
+		ping6Packet.identifier = htons ( 0 );					// As indirectly recommended by RFC ;)
+		ping6Packet.sequence_number = htons ( 0 );				// As indirectly recommended by RFC ;)
+
+		std::cout << "Discovering connected IPv6 devices..." << std::endl;
+			sendto(ndpDiscoverySocket, &ping6Packet, sizeof(ping6Packet), 0, (struct sockaddr*) &socketAddress, sizeof(socketAddress));
+			close(ndpDiscoverySocket);
+
+	
+		if (DEBUG)
+		{
+			char str[INET6_ADDRSTRLEN];
+			inet_ntop(AF_INET6, &allNodes, str, INET6_ADDRSTRLEN);
+		}
+	
+		exit(EXIT_SUCCESS);
+	}
+}
+
+
+/**
+ *	Extracts MAC and IPv4||IPv6 (if applicable) from specified interface 
+ *	This function works with Parameters structure
+ */
 void extractAddressesForInterface()
 {
 	struct ifaddrs* addressesStruct = NULL;
@@ -141,8 +408,6 @@ void extractAddressesForInterface()
 			addresses.netmask =	(struct sockaddr_in *) address->ifa_netmask;
 			addresses.ipv4 	  = (struct sockaddr_in *) address->ifa_addr;
 
-			//memcpy(&addresses.ipv4, address->ifa_addr, IPV4_LEN);
-
 			tmpAddrPtr = &((struct sockaddr_in *) address->ifa_addr)->sin_addr;
 			inet_ntop(AF_INET, tmpAddrPtr, strBuffer, INET_ADDRSTRLEN);
 
@@ -153,13 +418,14 @@ void extractAddressesForInterface()
 		}
 		else if (address->ifa_addr->sa_family == AF_INET6)
 		{
-			// TODO: IPv6 - the same thing under
 			char strBuffer[INET6_ADDRSTRLEN];
 
 			tmpAddrPtr = &((struct sockaddr_in6 *) address->ifa_addr)->sin6_addr;
 			inet_ntop(AF_INET6, tmpAddrPtr, strBuffer, INET6_ADDRSTRLEN);
 
 			addresses.ipv6AddressLocal = strBuffer;
+			
+			memcpy(&addresses.ipv6AddressLocalRaw, (struct in6_addr*) address->ifa_addr, IPV6_LEN);
 
 			if (DEBUG)
 				printf("Saved interface IPv6 address %s\n", addresses.ipv6AddressLocal.c_str());
@@ -180,15 +446,8 @@ void extractAddressesForInterface()
 			strcpy(req.ifr_name, address->ifa_name);
 			if (ioctl(sd, 0x8927, &req) != 1)
 			{
-				uint8_t* mac = (uint8_t*) req.ifr_ifru.ifru_hwaddr.sa_data; 	// WARNING: Risc of segfault?
+				uint8_t* mac = (uint8_t*) req.ifr_ifru.ifru_hwaddr.sa_data;
 				memcpy(&addresses.macAddressLocal, mac, MAC_ADDR_LEN);
-
-
-				if (DEBUG)
-					std::cout << "MAC Address for Interface " << P.interfaceName << ": ";
-					printReadableMACAddress(addresses.macAddressLocal);
-					std::cout << std::endl;
-
 			}
 		}
 	}
@@ -197,56 +456,41 @@ void extractAddressesForInterface()
 }
 
 
-
+/**
+ *	Executes scanning of network segment and looks for active stations (via ARP)
+ */
 void discoverDevicesARP()
 {
+
+	std::cout << "Discovering connected IPv4 devices." << std::endl;
+
+	// Calculate important network addresses	
 	uint32_t subnet = ntohl(inet_addr(inet_ntoa(addresses.netmask->sin_addr)));
 	uint32_t ip 	= ntohl(inet_addr(inet_ntoa(addresses.ipv4->sin_addr)));
-
 	uint32_t networkAddress = (subnet & ip);
 	uint32_t broadCastAddress = (networkAddress | (~subnet));
 
 
-	std::cout << "Network address: " << networkAddress << std::endl;
-	std::cout << "Broadcast address: " << broadCastAddress << std::endl;
-
-
 	ARPPacket arpDiscoveryPacket;
 
-	//std::vector<std::string> niceIPs;
-	//std::vector<uint32_t> IPsInRange;
-
 	pid_t workerProc = fork();
-	
-	if (workerProc == CHILD_PROCESS)
+	if (workerProc != CHILD_PROCESS)
 	{
-		// CHild should start receiving
-		std::cout << "I AM A CHILD AND I AM WAITING FOR SOMETING" << std::endl;
-
+		// Parent will receive packets that child process requested
 		int arpResponseSocket = socket (AF_PACKET, SOCK_DGRAM, htons(ETH_P_ARP));
-		if (arpResponseSocket < 0)
-		{
-			std::cerr << "Unable to open socket  for ARP response receiving!" << std::endl;
-			exit(1);
-		}
+			if (arpResponseSocket < 0) { std::cerr << "Unable to open socket for ARP response receiving!" << std::endl; exit(1); }
 
 		// Prepare local sockaddr_ll address
 		struct sockaddr_ll socketAddress;
-		socketAddress.sll_family = AF_PACKET;
-		socketAddress.sll_protocol = htons (ETH_P_ARP);
-		socketAddress.sll_ifindex = if_nametoindex(P.interfaceName.c_str());
-		socketAddress.sll_hatype = 1;
-		socketAddress.sll_pkttype = PACKET_OTHERHOST;
-		socketAddress.sll_halen = MAC_ADDR_LEN;
-		memcpy(&socketAddress.sll_addr, &addresses.macAddressLocal, MAC_ADDR_LEN);
-
+		prepareARPSocketAddress(&socketAddress, addresses.macAddressLocal);
+		
 		if (bind(arpResponseSocket, (sockaddr*) &socketAddress, sizeof(socketAddress)) < 0)
 		{
 			std::cerr << "Unable to bind socket for receiving ARP packets." << std::endl;
 			exit(1);
 		}
 
-		// We dont know when the stuff start coming
+		// Take as long as it comes
 		while(true)
 		{
 
@@ -264,8 +508,8 @@ void discoverDevicesARP()
 
 			if (recvfrom(arpResponseSocket, &arpDiscoveryPacket, sizeof(arpDiscoveryPacket), 0, NULL, NULL) <= 0)
 			{
-				std::cerr << "0 bytes response, problems when receiving packet, or timeouted." << std::endl;
-				break;
+				std::cerr << "ARP scan finished." << std::endl;
+				break;	// On exceeded timeout break the scan
 			}
 
 			if (arpDiscoveryPacket.operation != htons(ARP_OPERATION_REPLY))
@@ -274,40 +518,33 @@ void discoverDevicesARP()
 				continue;
 			}
 
-			// We know we have something, so we show it:
-			std::cout << "Discovered device on MAC:";
 
-			printReadableMACAddress( arpDiscoveryPacket.sender_hw_addr );
-
-
-
-			std::cout << " on IP:" << getReadableIPv4Address(arpDiscoveryPacket.sender_proto_addr) << "." << std::endl;
-			
-			// I should probably store it somewhere too
+			// Inform user about discovered device and store it
+			std::cout << "Discovered: ";
+			printReadableMACAddress(arpDiscoveryPacket.sender_hw_addr);
+			std::cout << " on IPv4 address: " << getReadableIPv4Address(arpDiscoveryPacket.sender_proto_addr) << std::endl;
+					
+			// Store discovered devices
 			Devices discovered;
 			memcpy(&discovered.macAddress, arpDiscoveryPacket.sender_hw_addr, MAC_ADDR_LEN);
 			memcpy(&discovered.ipv4Address, arpDiscoveryPacket.sender_proto_addr, IPV4_LEN);
 			
 			discoveredDevices.push_back(discovered);
-			// And figure out how to end on time
-
-			
 		}
-
-		// Make sure child process does not continue any further
-		exit(EXIT_SUCCESS);
+		
+		waitpid(workerProc, NULL, 0);	// Wait for child process to kill itself
 	}
-	else	// Parent sends ARP requests
+	else	
 	{	
-		// Create a socket and use it to send request
+		// Create a socket and use it to send ARP request
 		int arpDiscoverySocket = socket (AF_PACKET, SOCK_DGRAM, htons(ETH_P_ARP));
 			if (arpDiscoverySocket < 0)
 			{
 				std::cerr << "Unable to open socket for ARP discovery!" << std::endl;
-				exit(1);													// TODO: Reconsider exit codes
+				exit(1);													
 			}
 
-
+		// For every IPv4 address within network segment, generate ARP request
 		for (uint32_t i = (networkAddress+1); i < broadCastAddress; i++)
 		{
 			
@@ -330,12 +567,11 @@ void discoverDevicesARP()
 			memcpy(&arpDiscoveryPacket.target_proto_addr, &tmpBOAddress, IPV4_LEN);
 
 
-
 			struct sockaddr_ll socketAddress;
-			socketAddress.sll_family   = AF_PACKET;	// Always AF_PACKET (manual)
-			socketAddress.sll_protocol = htons ( ETH_P_ARP ); // To see all packets, ETH_P_IP would see only incoming (not necesary here, but will be later in)
+			socketAddress.sll_family   = AF_PACKET;										// Always AF_PACKET (manual)
+			socketAddress.sll_protocol = htons ( ETH_P_ARP ); 							
 			socketAddress.sll_ifindex  = if_nametoindex(P.interfaceName.c_str());
-			socketAddress.sll_hatype   = 1; // figure this out, it should be explained on arp(7p) man page
+			socketAddress.sll_hatype   = 1; 											// It's ethennet hw type
 			socketAddress.sll_pkttype  = PACKET_OTHERHOST;
 			socketAddress.sll_halen	   = MAC_ADDR_LEN;
 			memset(&socketAddress.sll_addr, 0xff, MAC_ADDR_LEN);
@@ -349,42 +585,47 @@ void discoverDevicesARP()
 			{
 				std::cerr << "Error when sending out ARP packet." << std::endl;
 			}
-			else
-			{
-				//std::cout << "Sending out packet, now!" << std::endl;
-			}
-
-
-			//std::cout << htons (i) << std::endl;
-
-
-			//niceIPs.push_back(getReadableIPv4Address(i));
-			//IPsInRange.push_back(i);	// TODO: Think about using htonl() here.
-			
 		}
 
-	
-
-		// TODO: Use this to print out possible report for errorneous child termination
-		waitpid(workerProc, NULL, 0);
+		exit(EXIT_SUCCESS);		// Commit suicide successfully.
 	}
-
-	
-
-	// Printing contents of niceIPs
-	/*for (std::vector<std::string>::iterator it = niceIPs.begin(); it != niceIPs.end(); it++)
-	{
-		std::cout << "IP address: " << *it << std::endl;
-	}*/
-
-
-
-	
-
-
-
 }
 
+
+/**
+ *	Helper function that prepares sockaddr_ll basic values for socket
+ */
+void prepareARPSocketAddress(struct sockaddr_ll* socketAddress, uint8_t* address)
+{
+		socketAddress->sll_family = AF_PACKET;
+		socketAddress->sll_protocol = htons (ETH_P_ARP);
+		socketAddress->sll_ifindex = if_nametoindex(P.interfaceName.c_str());
+		socketAddress->sll_hatype = 1;
+		socketAddress->sll_pkttype = PACKET_OTHERHOST;
+		socketAddress->sll_halen = MAC_ADDR_LEN;
+		memcpy(&socketAddress->sll_addr, &address, MAC_ADDR_LEN);
+}
+
+
+/**
+ *	Prepares socket IPV6 address for NDP socket (returns the structure)
+ */
+sockaddr_in6 prepareNDPSocketAddress(in6_addr address, std::string interfaceName)
+{
+	sockaddr_in6 socket;
+	socket.sin6_family = AF_INET6;
+	socket.sin6_port = 0; // ?
+	socket.sin6_flowinfo = 0; // ?
+	socket.sin6_addr = address;
+	socket.sin6_scope_id = if_nametoindex(interfaceName.c_str());
+	
+	return socket;
+}
+
+
+/**
+ *	Helper function transforming common IPv4 representation to dotted notation
+ */
 std::string getReadableIPv4Address(uint8_t* address)
 {
 	char str[INET_ADDRSTRLEN];
@@ -395,6 +636,10 @@ std::string getReadableIPv4Address(uint8_t* address)
 }
 
 
+/**
+ *  Helper function transforming common IPv4 representation to dotted notation 
+ *	(different signature)
+ */
 std::string getReadableIPv4Address(uint32_t address)
 {
 	char str[INET_ADDRSTRLEN];
@@ -405,77 +650,56 @@ std::string getReadableIPv4Address(uint32_t address)
 	return std::string(str);
 }
 
+
+/**
+ *  Helper fuinction converting common MAC address representation to something readable
+ */
 void printReadableMACAddress(uint8_t* MAC)
 {
 	printf("%02X:%02X:%02X:%02X:%02X:%02X", MAC[0], MAC[1], MAC[2], MAC[3], MAC[4], MAC[5]);
 }
 
-void discoverDevicesNDP()
+
+/**
+ *	Takes string representation of IPv6 address and stores its in6_addr 
+ *	representation to allNodes parameter.
+ */
+void convertStringToIPv6(std::string ipv6, in6_addr* allNodes)
 {
-	std::cout << "Scanning network for devices via NDP" << std::endl;
+	inet_pton(AF_INET6, ipv6.c_str(), allNodes);
 }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/*
-	// UNUSED CODE, PROOFS OF CONCEPT, ETC.
-
- 
-void extractAllInterfaceAddresses()
+/**
+ *	Helper function for converting IPv6 to something readable
+ */
+std::string convertIPv6ToString(in6_addr ipv6)
 {
-	struct ifaddrs* fullStructure = NULL;
-	struct ifaddrs* address = NULL;
-	void * tmpAddrPtr = NULL;
+	char str[INET6_ADDRSTRLEN];
 
-	if (getifaddrs(&fullStructure) != 0)
-	{
-		std::cerr << "Function getifaddrs() failed. Sorry about that." << std::endl;
-	}
+	inet_ntop(AF_INET6, &ipv6, str, INET6_ADDRSTRLEN);
 
-	for (address = fullStructure; address != NULL; address = address->ifa_next)
-	{
-		if (!address->ifa_addr)
-			continue;
-
-		if (address->ifa_addr->sa_family == AF_INET)
-		{
-			tmpAddrPtr = &((struct sockaddr_in *) address->ifa_addr)->sin_addr;
-			char addressBuffer[INET_ADDRSTRLEN];
-			inet_ntop(AF_INET, tmpAddrPtr, addressBuffer, INET_ADDRSTRLEN);
-			addresses.ipv4AddressLocal = addressBuffer;
-			printf("IP Address %s\n", addresses.ipv4AddressLocal.c_str());
-		}
-		else if (address->ifa_addr->sa_family == AF_INET6)
-		{
-			tmpAddrPtr = &((struct sockaddr_in6 *) address->ifa_addr)->sin6_addr;
-			char addressBuffer[INET6_ADDRSTRLEN];
-			inet_ntop(AF_INET6, tmpAddrPtr, addressBuffer, INET6_ADDRSTRLEN);
-			printf("%s IP Address %s\n", address->ifa_name, addressBuffer);
-		}
-	}
-
-	if (fullStructure!=NULL)
-		freeifaddrs(fullStructure);
+	return std::string(str);
 }
 
-*/
+
+/**
+ * DEBUG FUNCTIONS
+ */
+void debug_showDiscoveredIPv6()
+{
+	for (std::vector<in6_addr>::iterator it = discoveredPingIPv6.begin(); it != discoveredPingIPv6.end(); it++)
+	{
+		std::cout << "Discovered IPv6: " << convertIPv6ToString(*it) << std::endl;
+	}
+}
+
+void debug_showDiscoveredDevices()
+{
+	for (std::vector<Devices>::iterator it = discoveredDevices.begin(); it != discoveredDevices.end(); it++)
+	{
+		std::cout << "Discovered: ";
+		printReadableMACAddress(it->macAddress);
+		std::cout << " on IPv4 address: " << getReadableIPv4Address(it->ipv4Address) << std::endl;
+	}
+}

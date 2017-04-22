@@ -3,3 +3,7 @@ all:
 
 clean:
 	rm pds-scanner
+
+
+run:
+	sudo ./pds-scanner -i eth1 -f out.xml
