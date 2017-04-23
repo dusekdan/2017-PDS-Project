@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<devices>
+	<host mac="0800.271d.d984">
+		<ipv4>169.254.145.246</ipv4>
+		<ipv6>fe80::f1a3:9e59:5f7:474d</ipv6>
+	</host>
+	<host mac="0800.27a9.1bdb">
+		<ipv4>169.254.179.143</ipv4>
+		<ipv6>fe80::c628:cac5:2523:265a</ipv6>
+	</host>
+</devices>
