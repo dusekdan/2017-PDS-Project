@@ -1,0 +1,184 @@
+\documentclass[a4paper, 11pt]{article}
+\usepackage[left=1.5cm,text={18cm, 25cm},top=2.5cm]{geometry}
+\usepackage[utf8x]{inputenc} 
+\usepackage[czech]{babel}
+\usepackage[IL2]{fontenc}
+\providecommand{\uv}[1]{\quotedblbase #1\textquotedblleft}
+%\usepackage{times}
+\usepackage{amsthm}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{fancyvrb}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\hypersetup{
+    colorlinks,
+    citecolor=black,
+    filecolor=black,
+    linkcolor=black,
+    urlcolor=black
+}
+
+\title{L2 MitM}
+\author{Daniel Dušek (xdusek21@vutbr.cz)}
+
+\setlength{\parindent}{4em}%
+\setlength{\parskip}{1em}%
+\renewcommand{\baselinestretch}{1.25}
+
+\begin{document}
+
+\thispagestyle{empty}
+\begin{center}
+\Huge
+\textsc{Fakulta informačních technologií
+Vysoké učení technické v~Brně}\\
+\LARGE
+\vspace{\stretch{0.382}}
+Přenos dat, počítačové sítě a protokoly\\
+L2 MitM
+
+\vspace{\stretch{0.618}}
+\end{center}
+{\Large \today \hfill Daniel Dušek}
+
+\newpage
+% Clearly a %TODO
+\tableofcontents
+
+\newpage
+\setcounter{page}{1} 
+
+\section{Úvod}
+	\indent\par{Cílem projektu bylo naimplementovat sadu aplikací jejichž použitím lze demonstrovat možnost provedení úspěšného útoku typu MitM na L2 vrstvě. Tyto aplikace se konkrétně soustředí na provedení MitM útoku s využitím protokolů ARP a NDP.}
+	\par{Tato dokumentace obsahuje zjednodušený popis zmíněných protokolů, se speciální pozorností věnovanou způsobům jak využít jejich zprávy ke zmatení zařízení připojených k síti a realizovat s jejich pomocí MitM útok.}
+	\par{Dále je zde popsána implementace jednotlivých aplikací a v závěru i demonstrace použití aplikací v prostředí domácí virtualizaované sítě.}
+
+\newpage
+\section{Útoky typu Man in the Middle}
+	\indent\par{Útoky typu MitM \-- \textit{Man-in-the-Middle} \-- jsou útoky typické tím, že se na síti kromě normálních komunikujících aktérů vyskytuje ještě jeden, či více dalších aktérů \-- tzv. \textit{útočníci}, kteří nepozorovaně zasahují do komunikace. Typickou motivací útočníků může být zisk dat posílaných po síti, která nejsou určena pro ně, a to, pokud možno, nepozorovaně. Další motivací pak může být například narušení provozu na síti.}
+
+	\par{Pro zisk těchto informací je ve většině případů potřeba nějakým způsobem zmást komunikující stanice na síti \-- například tak, že jim útočící stanice tvrdí, že je někdo jiný. Díky tomu pak může přebírat komunikaci těchto stanic a provádět nad ní škodlivou činnost (odposlech, modifikace, zahození a další).}
+
+	\par{Stanice útočníka realizuje matení stanic na síti tak, že podvrhuje \-- zpravidla opakovaně po časovém intervalu \-- zprávy, které mezi sebou stanice využívají k tomu, aby se v síti dokázaly lokalizovat a posléze spojit. Často zneužívanými protokoly jsou potom \textit{ARP} a \textit{NDP}, jejichž využití je popsáno níže v této práci.}
+
+
+\section{ARP \-- Address Resolution Protocol}
+
+\par{Protokol ARP je využíván k překladu L3 adres (například IP) na L2 adresy (typicky MAC). Stanice v IPv4 síti využívají tohoto protokolu k zjištění, kde se nachází ostatní stanice, se kterými mají zájem komunikovat.} 
+
+\par{Protokol obsahuje celkem 4 typy zpráv \-- ARP request (dotaz na L2 adresu stanice jejíž L3 adresu stanice, která požadavek posílá zná), ARP reply (odpověď na ARP request obsahující L3 adresu a její L2 umístění), a další dvě zprávy pro reverzní rezoluci, které nejsou pro kontext této dokumentace důležité. Protokol nepodporuje žádnou vestavěnou formu ověření původu zpráv, čehož implementované aplikace využívají.}
+
+\subsection{ARP Tabulka}
+\par{Uvažme scénář, kdy stanice S1 chce komunikovat se stanicí S2, ale zná pouze její L3 adresu, například \texttt{169.254.179.143}. S1 pošle ARP request na MAC broadcast adresu \texttt{FF:FF:FF:FF:FF:FF}, ve které se ptá \textit{\uv{Kdo má 168.254.179.143}}. Dostane se jí odpovědi, kde S2 odpovídá, že se nachází na L2 adrese \texttt{08:00:27:56:97:53}. S1 si ukládá tuto informaci do své lokální cache, zvané ARP tabulka. Při příštím pokusu o komunikaci se stanicí na L3 adrese bude stanice vycházet z informace, kterou má uloženou v cache paměti (je-li stále přítomna) a bude vědět, že má komunikovat s konkrétní L2 adresou.}
+\par{Obsah lokální ARP cache se dá vypsat (min. pro Linux a Windows) pomocí příkazu \texttt{arp -a}, vypsaný obsah tabulky může vypadat například takto:}
+\begin{Verbatim}
+pds2 (169.245.74.244) at 08:00:27:a9:1b:db [ether] on eth1
+pds3 (169.245.174.244) at 08:00:27:cc:dd:db [ether] on eth1
+\end{Verbatim}
+
+\subsection{Otrávení ARP Tabulky}
+\indent\par{Otrávení tabulky je způsob útoku, kterým můžeme donutit stanici S1, aby při příštím pokusu o komunikaci se stanicí S2, jejíž hodnotu má uloženou ve své lokální ARP tabulce, začala komunikovat se stanicí útočníka. Otrávení tabulky bude probíhat jako kontinuální činnost prováděná útočící stanicí \-- útočící stanice bude generovat periodicky ARP reply zprávy ve které bude informovat, že L3 adresa stanice S2 se nachází pod L2 adresou stanice útočníka. Při příští komunikaci stanice S1 se z lokální ARP cache tabulky vybere otrávený záznam odpovídající L3 adresy stanice S2 a stanice S1 zahájí komunikaci se stanicí útočníka.}
+
+\subsection{Intercept \-- Přeposílání provozu}
+\indent\par{\textit{Tato sekce je poplatná i pro útok otrávení NDP cache.}}
+\par{Po otrávení ARP/NDP cache tabulky a donucení odpovídajících stanic \-- tj. takový stanic, v jejichž komunikaci má útočící stanice zájem se angažovat \-- komunikovat s útočící stanicí je třeba zajistit, aby tyto stanice nic nepoznaly. Útočící stanice, hrající roli \textit{Man-in-the-Middle} to zajistí tak, že přijatá data od stanice S1 přepošle stanici S2 a obráceně. Samotné přeposílání je realizováno záměnou cílové L2 adresy zprávy, kterou obdržela útočící stanice, za adresu odposlouchávané stanice za kterou nás stanice co odesílala zprávu považuje.}
+
+\section{NDP \-- Neighbor Discovery Protocol}
+\indent\par{Pro stanice v IPv6 sítích již ARP protokol není dostačující a proto byl zaveden protokol NDP, který (mimo jiné) umožňuje stanicím v síti se vzájemně lokalizovat. Tato dokumentace se bude zabývat pouze podmnožinou zpráv tohoto protokolu a to takových, které jsou vhodné pro vykonání MitM útoku NDP cache poisoning. Jsou to zprávy  \texttt{Neightbor Solicitation} a \texttt{Neighbor Advertisement}.}
+
+\par{Zpráva \texttt{Neighbor Solicitation} slouží k zjištění L2 adresy stanice v síti na základě její L3 adresy. Zpráva \texttt{Neighbor Advertisement} slouží k oznámení kde se v rámci L2 sítě stanice na síti nachází. Tato zpráva může být zaslána jako \texttt{solicited} resp. \texttt{unsolicited} v závislosti na tom, zda je, resp. není, poslána jako odpověď na zprávu typu \texttt{NS}.}
+
+\subsection{NDP \-- Lokální cache tabulka}
+\indent\par{Opět, podobně jako v případě ARP, si každá stanice v IPv6 síti udržuje svou lokální tabulku o umístění ostatních stanic v rámci L2 sítě, zvanou NDP cache. I tato tabulka jde otrávit a implementovaná aplikace \textit{PDS-Spoof} toto realizuje. Princip je velmi podobný jako u otrávení ARP cache a je blíže popsán v sekci Implementace.}
+
+\par{Obsah lokální NDP cache jde zobrazit na referenčním obrazu ISA2015 pomocí příkazu \texttt{ip -6 neighbor show}, vypsaný obsah pak může vypadat například takto:}
+\begin{Verbatim}
+fe80::c628:cac5:2252:265a    dev    eth1    lladdr    08:00:27:a9:1b:db
+fe80::e770:cac5:2252:d323    dev    eth1    lladdr    08:00:27:b6:a9:8c
+\end{Verbatim}
+
+
+
+\section{Implementace}
+\par{Jako implementační jazyk byl zvolen \texttt{C++11}, přeložitelný na poskytnutém referenčním stroji. Implementace částí projektu je rozdělena do jednotlivých souborů s názvy \texttt{pds-spoof}, \text{pds-scan}, vždy s příponami *.cpp a *.h.}
+
+\subsection{Implementace nástroje PDS-Scanner}
+	\par{Z implementačního hlediska jsou v nástroji přítomny dvě hlavní větve - větev pro skenování IPv4 sítě a větev pro skenování IPv6 sítě, v kódu zapouzdřeny do funkcí \texttt{discoverDevicesARP()} a \texttt{discoverDevicesNDP()}. Funkce jsou provedeny sekvenčně \-- nejprve je oskenována IPv4 síť a až následně síť IPv6. Implementace jednotlivých funkcí však využívají více samostatných procesů, viz. níže. Skenovací aplikace se po proskenování sítě sama ukončí a vygeneruje výstupní soubor, dle požadavků ze zadání. Pokud je aplikace ukončena násilně signálem \texttt{SIGINT}, skenování je ukončeno a soubor je i přesto vygenerován.}
+
+	\par{\textbf{discoverDevicesARP()} implementuje funkcionalitu skenování sítě skrze množství generovaných zpráv typu ARP Request, na všechny adresy v síti. Před vykonáním funkce je volána funkce \\ \texttt{extractAddressesForInterface()}, která získá do interní struktury lokální MAC, IPv4, IPv4 masku sítě a IPv6 adresy. Lokální IPv4 adresa a maska sítě jsou použity k vypočítání rozsahu segmentu sítě, který funkce skenuje. Dále je pak funkce rozdělena na rodičovský a potomkovský uzel, kde právě potomek počítá možné adresy v síti a posílá na ně ARP request. Rodič mezitím čeká na odpovědi, které zapracuje a uloží do vnitřní struktury existujících zařízení v IPv4 síti. Nepřijdou-li po dobu 2 sekund žádné odpovědi, rodič se taktéž ukončí a program pokračuje ve větvi skenující IPv6 síť.}
+
+	\par{\textbf{discoverDevicesARP()} implementuje skenování IPv6 sítě. Pro initiální průzkum sítě je program ihned rozdělen na rodiče a potomka, kde potomek opět posílá požadavek a rodič přijímá odpovědi. Potomek vytvoří ICMPv6 paket simulující zprávu \texttt{ICMPv6 ECHO} a tento paket zašle na multicastovou adressu \texttt{ff02::1}, která odpovídá všem uzlům v síti \textit{(pozn. autora: a dalo by se ji považovat za maskovaný broadcast)}, následně se ukončí. Uzly připojené na multicastovou adresu \uv{všechny uzly} se pak ozvou s ICMPv6 zprávou ECHO reply. Rodič si ozývající se uzly pochytá a jejich IP adresy si uloží do vnitřní struktury objevených IPv6 adres.}
+
+	\par{Dále se rodič opět rozpoltí a vytvoří nový potomkovský proces. Potomek převezme strukturu naplněnou ozývajícími se IPv6 adresami, zkonstruuje NDP zprávu typu \texttt{Neighbor Solicitation}, spočítá si multicastovou adresu cílového uzlu a tuto zprávu na ni odešle. Výpočet multicastové adresy probíhá tak, že se vezme 104 prvních bitů z \uv{všechny-uzly prefixu} a 24 posledních bitů z adresy cílového uzlu a spojí se dohromady. Oslovené uzly se ozvou zpět se zprávou \texttt{Neighbor Advertisement} a rodič tuto zprávu chytí a nalezené zařízení uloží do své vnitřní struktury nalezených zařízení. Rodič čeká vždy 1 sekundu na příchozí zprávu a nedojde-li, sníží počítačku \uv{zbývajících pokusů} (nastavena na 5 při inicializaci) o jedničku. Přijde-li (očekávaná) zpráva, počítačku opět nastaví na 5. Nedostane-li 5x za sebou žádnou zprávu, ukončí se.}
+
+	\par{Není-li program v době svého běhu násilně ukončen (a tedy je vyvoláno generování souboru), vygeneruje soubor a dobrovolně se ukončí.}
+
+\subsection{Implementace nástroje PDS-Spoof}
+	\par{Po zpracování parametrů je možné se již ve vstupním bodě aplikace rozhodnout, jestli budeme otravovat ARP nebo NDP cache  a tedy jsou opět k dispozici dvě větve, kterými se program může vydat - \texttt{poisonARPCache} a \texttt{poisonNDPCache}. Po spuštění se program sám od sebe neukončí a čeká na své násilné ukončení pomocí signálu \texttt{SIGINT}. Dojde-li k tomuto násilnému ukončení, je volána v závilosti na parametry specifikovaném protokolu buď funkce \texttt{antidoteARPCache()} nebo \texttt{antidoteNDPCache()}, které se postarají o navrácení stavu cache otravovaných zařízení do původního stavu.}
+
+	\par{\textbf{poisonARPCache()} implementuje process otravování cache zařízení specifikovaných skrze parametry spuštění programu. Na základě těchto parametrů jsou tedy vytvořeny podvržené ARP pakety typu \texttt{reply}, které obsahují vždy IP adresu jedné z obětí a MAC adresu útočící stanice. Tyto pakety jsou pak odesílány odpovídajícím stanicím v nekonečném cyklu (s odpovídajícím, parametry specifikovaným intervalem) stále dokola čímž dochází k otravování cache. Funkce sama od sebe nikdy neskončí a čeká, až bude ukončena signálem SIGINT.}
+
+	\par{\textbf{poisonNDPCache()} funkce je implementována velmi podobným způsobem \-- ze strukturálního pohledu \-- jako funkce \texttt{poisonARPCache()}. Rozdílem je zde však způsob otravování cache. Jsou zde místo ARP paketů vytvořeny NDP pakety typu \texttt{Neighbor Advertisement}, kde jsou opět odpovídajícím a analogickým způsobem prohozené IP a MAC adresy. Tento paket je ještě rozdílný oproti normálním NA paketům tím, že v jeho části pro \uv{flags} je nastaven \texttt{override} bit, který zaručuje, že při přijetí zprávy přepíše hodnotu v cache na cílové stanici. Další změnou je pak to, že tato NA zpráva není posílána jako \uv{solicited}, ale jako \uv{unsolicited} \-- tzn. není přímou odpovědí na ničí solicitation dotaz.}
+
+	\par{\textbf{antidoteARPCache(), antidoteNDPCache()} funkce implementují \uv{protilátku} podanou stanicím v moment co je aplikace PDS-Spoof ukončena. Realizovány jsou v podstatě stejným způsobem: Pošlou cílovým stanicím dvojice zpráv se správnými IP a MAC adresami. Tyto zprávy jsou poslány pro jistotu vícekrát (20x) a před jejich odesíláním se program uspí na stejný moment, jako je interval mezi odesíláním otrávených paketů \-- tím je dosaženo toho, že i při zahlcení linky je cache uvedena do správného stavu.}
+
+
+\section{Demonstrace činnosti}
+\par{Aplikace byly implementovány a testovány v prostředí třech propojených virtuálních strojů referenčního stroje ISA2015. Každý z virtuálních strojů byl pak dále označován síťovým aliasem pdsX, kde X náleží do z obou stran uzavřeného intervalu od 1 do 3. Útočící stanicí byl vždy uvažován stroj pds1. Virtuální síť je možné popsat takto:}
+
+\begin{Verbatim}
+eth1 pds1 MAC: 08:00:27:81:B7:C8  IPv4: 169.254.167.236 IPv6: fe80::ee94:42ac:df70:d323
+eth1 pds2 MAC: 08:00:27:A9:1B:DB  IPv4: 169.254.179.143 IPv6: fe80::e779:30b6:9b28:5b9f
+eth1 pds3 MAC: 08:00:27:1D:D9:84  IPv4: 169.254.145.246 IPv6: fe80::af08:e6e4:72:b59a
+Maska sítě 255.255.0.0
+\end{Verbatim}
+
+\subsection{Demonstrace činnosti aplikace PDS Scanner}
+\par{Po přeložení aplikace PDS-Scanner a jejím spuštění příkazem \texttt{./PDS\--Scanner \--i eth1 \--f out.xml} se jako výstupní soubor vygeneruje následující výstup:}
+\begin{Verbatim}
+<?xml version="1.0" encoding="UTF-8"?>
+<devices>
+    <host mac="0800.271d.d984">
+        <ipv4>169.254.145.246</ipv4>
+        <ipv6>fe80::af08:e6e4:72:b59a</ipv6>
+    </host>
+    <host mac="0800.27a9.1bdb">
+        <ipv4>169.254.179.143</ipv4>
+        <ipv6>fe80::e779:30b6:9b28:5b9f</ipv6>
+    </host>
+</devices>
+\end{Verbatim}
+
+\par{Kromě výstupu do souboru se navíc na obrazovce objeví textová informace o dokončení skenovací procedury.}
+
+
+\subsection{Demonstrace činnosti aplikace PDS Spoof}
+\par{Nejprve se na obětních stanicích podíváme do ARP cache \texttt{arp \--a} a zjistíme, že záznamy pro všechny se zdají býti platné. Při použití příkazu \texttt{ping} na druhou napadanou stanici se ping vrací.}
+
+\par{Po přeložení a spuštění aplikace na útočící pds1 stanici příkazem:}
+\begin{Verbatim}
+./pds-spoof -i eth1 -t 1000 -p arp 
+-victim1ip 169.254.179.143 -victim1mac 0800.27a9.1bdb 
+-victim2ip 169.254.145.246 -victim2mac 0800.271d.d984
+\end{Verbatim}
+
+\par{Je možné pomocí příkazu \texttt{arp \--a} zkontrolovat na obětních stanicích, že jejich arp záznam pro druhou obětní stanici změnil svou MAC adresu. Příkaz \texttt{ping} nefunguje, neboť provoz není přeposílán. Zastavíme-li nyní program signálem SIGINT (stisk CTRL+C) a znovu si prohlédneme výstup příkazu \texttt{arp \--a}, uvidíme, že vše bylo vráceno do původního stavu a příkaz \texttt{ping} začne opět fungovat.}
+
+\par{Stejným způsobem a dvojicí příkazů \texttt{ip -6 neighbor show} a \texttt{ping6} můžeme demonstrovat i pro NDP.}
+
+\newpage
+\Huge{Literatura}
+\large
+
+\begin{enumerate}[label={[\arabic*]}]
+
+	\item DeSanti, C., Carlson, C., and R. Nixon, "Transmission of IPv6, IPv4, and Address Resolution Protocol (ARP) Packets over Fibre Channel", RFC 4338, DOI 10.17487/RFC4338, January 2006, <http://www.rfc-editor.org/info/rfc4338>.
+
+	\item Narten, T., Nordmark, E., and W. Simpson, "Neighbor Discovery for IP Version 6 (IPv6)", RFC 1970, DOI 10.17487/RFC1970, August 1996, <http://www.rfc-editor.org/info/rfc1970>.
+
+	\item Conta, A. and S. Deering, "Internet Control Message Protocol (ICMPv6) for the Internet Protocol Version 6 (IPv6)", RFC 1885, DOI 10.17487/RFC1885, December 1995, <http://www.rfc-editor.org/info/rfc1885>.
+
+\end{enumerate}
+
+\end{document}
