@@ -34,7 +34,9 @@
 #include <sys/time.h>
 #include <errno.h>
 #include <netinet/icmp6.h>
-
+#include <sstream>
+#include <fstream>
+#include <iomanip>
 
 /**
  * Structure representing ARP Packet
@@ -153,3 +155,7 @@ std::string convertIPv6ToString(in6_addr ipv6);
 void convertStringToIPv6(std::string ipv6, in6_addr* allNodes);
 void debug_showDiscoveredIPv6();
 std::vector<in6_addr> discoveredPingIPv6;
+bool generateOutputFile();
+void preventViolentTermination(int source);
+void preventViolentTerminationChildProcess(int source);
+void addDeviceRecord(Devices discovered);

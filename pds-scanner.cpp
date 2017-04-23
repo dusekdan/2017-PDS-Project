@@ -7,9 +7,15 @@ int main(int argc, char **argv)
 {
 	// Process parameters
 	processArguments(argc, argv);
+
+	// Print something nice
+	std::cout << std::endl << "========= ========= ========= SCAN STARTED ========= ========= =========" << std::endl;
 	
 	// Extract required information from provided interface and store it to global variable/proper structure
 	extractAddressesForInterface();
+
+	// Prevent violent termination
+	signal(SIGINT, &preventViolentTermination);
 
 	// Initiate ARP scanning (if applicable) - IPv4
 	discoverDevicesARP();
@@ -19,6 +25,8 @@ int main(int argc, char **argv)
 
 	// Show discovered devices to user
 	debug_showDiscoveredDevices();
+
+	generateOutputFile();
 
 	return EXIT_SUCCESS;
 
@@ -153,10 +161,6 @@ void discoverDevicesNDP()
 		// Receive responses
 		while (true)
 		{
-			
-			//std::cout << "Catching replies..." << std::endl;
-			//std::cout << "Devices discovered. Proceeding to send solicitations." << std::endl; 
-
 			struct timeval tv;
 			tv.tv_sec = 1;
 			tv.tv_usec = 0;
@@ -250,7 +254,7 @@ void discoverDevicesNDP()
 					Devices discovered;
 					memcpy(&discovered.macAddress, nap.MAC, MAC_ADDR_LEN);
 					discovered.ipv6AddressLL = convertIPv6ToString(nap.head.nd_na_target);
-					discoveredDevices.push_back(discovered);
+					addDeviceRecord(discovered);
 
 					// Reset retry counter and inform user
 					std::cout << "Resetting retry counter, 5 retries remaining..." << std::endl;
@@ -262,6 +266,7 @@ void discoverDevicesNDP()
 		}
 		else
 		{
+			signal(SIGINT, &preventViolentTerminationChildProcess);
 
 			// For every discovered IPv6 send neighbor solicitation packet
 			for (std::vector<in6_addr>::iterator it = discoveredPingIPv6.begin(); it != discoveredPingIPv6.end(); it++)
@@ -529,13 +534,15 @@ void discoverDevicesARP()
 			memcpy(&discovered.macAddress, arpDiscoveryPacket.sender_hw_addr, MAC_ADDR_LEN);
 			memcpy(&discovered.ipv4Address, arpDiscoveryPacket.sender_proto_addr, IPV4_LEN);
 			
-			discoveredDevices.push_back(discovered);
+			addDeviceRecord(discovered);
 		}
 		
 		waitpid(workerProc, NULL, 0);	// Wait for child process to kill itself
 	}
 	else	
 	{	
+		signal(SIGINT, &preventViolentTerminationChildProcess);
+
 		// Create a socket and use it to send ARP request
 		int arpDiscoverySocket = socket (AF_PACKET, SOCK_DGRAM, htons(ETH_P_ARP));
 			if (arpDiscoverySocket < 0)
@@ -684,6 +691,189 @@ std::string convertIPv6ToString(in6_addr ipv6)
 
 
 /**
+ *	Smartly adds device record
+ * 	Considers possibility of already located IPv4 device with same MAC address
+ */
+void addDeviceRecord(Devices discovered)
+{	
+	// We have to consider discovered.macAddress to be the key and check whether corresponding record exists
+	bool recordPresent = false;
+	int  elementIndex = 0;
+	for(std::vector<Devices>::iterator it = discoveredDevices.begin(); it != discoveredDevices.end(); it++)
+	{
+		// Record we are trying to store is already present (merge should be done)
+		if (it->macAddress[0] == discovered.macAddress[0] &&
+			it->macAddress[1] == discovered.macAddress[1] &&
+			it->macAddress[2] == discovered.macAddress[2] &&
+			it->macAddress[3] == discovered.macAddress[3] &&
+			it->macAddress[4] == discovered.macAddress[4] &&
+			it->macAddress[5] == discovered.macAddress[5])
+		{
+			recordPresent = true;
+			break;
+		}
+
+		elementIndex++;
+	}
+
+	if (recordPresent)
+	{
+
+	 	if (DEBUG)
+	 		std::cout << "Record is present and we will try to merge." << std::endl;
+
+		// We are only interested in IPv6 records for mergin
+		if (!discovered.ipv6AddressLL.empty())
+		{
+			// We should merge discovered device to existing record
+			if (discoveredDevices.at(elementIndex).ipv6AddressLL.empty())
+			{
+				discoveredDevices.at(elementIndex).ipv6AddressLL = discovered.ipv6AddressLL;
+				
+				if (DEBUG)
+					std::cout << "Record was inserted to main slot at position " << elementIndex << std::endl;
+			}
+			else
+			{
+				// Device record already has IPv6 - use reserve slot
+				discoveredDevices.at(elementIndex).ipv6AddressSTD = discovered.ipv6AddressLL;
+				
+				if (DEBUG)
+					std::cout << "Record was inserted to resever slot at position " << elementIndex << std::endl;
+			}
+		}
+	}
+	else
+	{
+		if (DEBUG)
+			std::cout << "Record was not present, but was made present." << std::endl;
+		
+		discoveredDevices.push_back(discovered);	
+	}
+
+}
+
+
+/**
+ *	Generate output file
+ *	Outputfile name is loaded from processed argument for -f parameter.
+ */
+bool generateOutputFile()
+{
+
+	std::string ofHeader = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+	std::string ofRootElement = "<devices>\n";
+	std::string ofRootElementClose = "</devices>\n";
+
+	std::string ofContent = ofHeader;
+	ofContent.append(ofRootElement);
+
+
+	for (std::vector<Devices>::iterator it = discoveredDevices.begin(); it != discoveredDevices.end(); it++)
+	{
+		std::string ofHostNode = "\t<host mac=\"";
+		std::string ofHostNodeClose = "\t</host>\n";
+
+		// Prepare HOST & MAC values
+		std::stringstream ofFormattedMAC;
+		ofFormattedMAC << 
+		std::setfill('0') << std::setw(2) << std::hex << (unsigned short) it->macAddress[0]
+		<< std::setfill('0') << std::setw(2) << std::hex << (unsigned short) it->macAddress[1] << "." 
+		<< std::setfill('0') << std::setw(2) << std::hex << (unsigned short) it->macAddress[2] 
+		<< std::setfill('0') << std::setw(2) << std::hex << (unsigned short) it->macAddress[3] << "." 
+		<< std::setfill('0') << std::setw(2) << std::hex << (unsigned short) it->macAddress[4] 
+		<< std::setfill('0') << std::setw(2) << std::hex << (unsigned short) it->macAddress[5]; 
+
+		// Prepare IPv4, IPv6 values
+		// if (it->ipv4Address ) // TODO: Check for value not zero
+		
+		std::string ofIPv4Node = "\t\t<ipv4>";
+		std::string ofFormattedIPV4 = getReadableIPv4Address(it->ipv4Address);
+		std::string ofIPv4NodeClose = "</ipv4>\n";
+
+		std::string ofIPv6Node1 = "";
+		std::string ofIPv6Node1Close = "";
+		if (!it->ipv6AddressLL.empty())
+		{
+			ofIPv6Node1.append("\t\t<ipv6>");
+			ofIPv6Node1.append(it->ipv6AddressLL);
+			ofIPv6Node1Close.append("</ipv6>\n");
+		}
+
+		std::string ofIPv6Node2 = "";
+		std::string ofIPv6Node2Close = "";
+		if (!it->ipv6AddressSTD.empty())
+		{
+			ofIPv6Node2.append("\t\t<ipv6>");
+			ofIPv6Node2.append(it->ipv6AddressSTD);
+			ofIPv6Node2Close.append("</ipv6>\n");
+		}
+
+		ofContent.append(ofHostNode);
+		ofContent.append(ofFormattedMAC.str());
+		ofContent.append("\">\n");
+		ofContent.append(ofIPv4Node);
+		ofContent.append(ofFormattedIPV4);
+		ofContent.append(ofIPv4NodeClose);
+		ofContent.append(ofIPv6Node1);
+		ofContent.append(ofIPv6Node1Close);
+		ofContent.append(ofIPv6Node2);
+		ofContent.append(ofIPv6Node2Close);
+		ofContent.append(ofHostNodeClose);
+	}
+
+	ofContent.append(ofRootElementClose);
+
+	
+	// Open file and write it in it
+	std::ofstream outputFile;
+	outputFile.open(P.outputFileName.c_str(), std::ios::out | std::ios::trunc);
+	outputFile << ofContent;
+	outputFile.close();
+
+	// No space for error
+	return true;
+}
+
+
+/**
+ * Handles violent script termination (for now only CTRL+C type of signal)
+ * On SIGINT end restores cache to its former state and then exits (successfuly)
+ */
+void preventViolentTermination(int source)
+{
+	std::cerr << std::endl << "Termination request recorded. Output file is being generated..." << std::endl;
+
+	std::string generationSuccess;
+	if (generateOutputFile())
+	{
+		generationSuccess = " [OK]";
+	}
+	else
+	{
+		generationSuccess = " [KO] - Sorry, there was an error during file generation. Permissions?";
+	}
+
+	std::cerr << "Output file generated:\t" << P.outputFileName << generationSuccess << std::endl;
+
+	exit(EXIT_SUCCESS);
+}
+
+
+/**
+ *	Handles violent termination of the child processes
+ *  Child processes are all using non-blocking calls and their 
+ *	termination does not require special handling, hence the
+ *	function is empty
+ */
+void preventViolentTerminationChildProcess(int source)
+{
+
+	std::cout << "\tAlso:" << std::endl;
+	std::cout << "\t\t...Child process terminated." << std::endl;
+}
+
+/**
  * DEBUG FUNCTIONS
  */
 void debug_showDiscoveredIPv6()
@@ -696,10 +886,19 @@ void debug_showDiscoveredIPv6()
 
 void debug_showDiscoveredDevices()
 {
+
+	std::cout << std::endl << "========= ========= ========= SCAN RESULTS ========= ========= =========" << std::endl << std::endl;
+
 	for (std::vector<Devices>::iterator it = discoveredDevices.begin(); it != discoveredDevices.end(); it++)
 	{
-		std::cout << "Discovered: ";
+		std::cout << "Discovered device: ";
 		printReadableMACAddress(it->macAddress);
-		std::cout << " on IPv4 address: " << getReadableIPv4Address(it->ipv4Address) << std::endl;
+		std::cout << std::endl;
+		std::cout << "\tIPv4(" << getReadableIPv4Address(it->ipv4Address) <<")" << std::endl;
+		std::cout << "\tIPv6(" << it->ipv6AddressLL << ")" << std::endl;
+		std::cout << "\tIPv6-r(" << it->ipv6AddressSTD << ")" << std::endl << std::endl;
 	}
+
+	std::cout << "========= ========= ========= SCAN COMPLETED ========= ========= =========" << std::endl;
+	std::cout << "Scan output was written in " << P.outputFileName << std::endl;
 }
