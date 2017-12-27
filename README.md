@@ -4,5 +4,5 @@
 Feel free to get inspired, but be careful not to end up facing disciplinary commission in case of too much inspiration. 
 
 ___
-# FIT VUT, PDS - Nástroje pro ARP/NDP cache poisoning útok
+# FIT VUT, PDS - Nástroje pro ARP/NDP cache poisoning
 *Školní projekty do předmětu PDS (Přenos dat, počítačové sítě a protokoly), Fakulta Informačních Technologií, Vysoké Učení Technické Brno.*
